@@ -7,44 +7,12 @@ app.use(express.json());
 app.use(cors());
 
 // ================== DATA ==================
-const activeCodes = new Map();        // code -> { discordId, username, expiresAt }
-const requestCounts = new Map();      // discordId -> [timestamps]
+// code -> { discordId, username, expiresAt }
+const activeCodes = new Map();
 
 // ================== UTILS ==================
 function generateCode() {
   return crypto.randomBytes(4).toString('hex').toUpperCase();
-}
-
-// ================== RATE LIMIT (SOLO /generate-code) ==================
-function rateLimit(req, res, next) {
-  const discordId = req.body.discordId;
-  if (!discordId) return next();
-
-  const now = Date.now();
-
-  if (!requestCounts.has(discordId)) {
-    requestCounts.set(discordId, []);
-  }
-
-  let requests = requestCounts.get(discordId);
-
-  // Evitar contar requests duplicadas muy cercanas (Discord / retries)
-  if (!requests.some(t => now - t < 3000)) {
-    requests.push(now);
-  }
-
-  // Mantener solo requests del último minuto
-  requests = requests.filter(t => now - t < 60000);
-  requestCounts.set(discordId, requests);
-
-  // Límite realista
-  if (requests.length > 10) {
-    return res.status(429).json({
-      error: 'Demasiadas peticiones'
-    });
-  }
-
-  next();
 }
 
 // ================== HEALTH CHECK ==================
@@ -56,7 +24,7 @@ app.get('/', (_, res) => {
 });
 
 // ================== GENERAR CÓDIGO ==================
-app.post('/generate-code', rateLimit, (req, res) => {
+app.post('/generate-code', (req, res) => {
   try {
     const { discordId, username } = req.body;
 
@@ -66,7 +34,7 @@ app.post('/generate-code', rateLimit, (req, res) => {
       });
     }
 
-    // Si ya tiene un código válido, devolver el mismo
+    // Si el usuario ya tiene un código válido, devolver el mismo
     for (const [code, data] of activeCodes.entries()) {
       if (data.discordId === discordId && Date.now() < data.expiresAt) {
         return res.json({ code });
