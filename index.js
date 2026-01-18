@@ -68,17 +68,18 @@ app.post("/generate-code", async (req, res) => {
       return res.status(400).json({ error: "discordId required" });
     }
 
-    // Remove expired codes
+    // Clean expired codes
     await pool.query(
       `DELETE FROM codes WHERE expires_at < NOW()`
     );
 
-    // Check active code
+    // Check active (non-expired) code
     const existing = await pool.query(
       `
       SELECT code, expires_at
       FROM codes
       WHERE discord_id = $1
+        AND expires_at > NOW()
       ORDER BY created_at DESC
       LIMIT 1
       `,
