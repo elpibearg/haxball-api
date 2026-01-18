@@ -1,130 +1,126 @@
-const express = require('express');
-const cors = require('cors');
-const crypto = require('crypto');
+import express from "express";
+import pkg from "pg";
+import crypto from "crypto";
+
+const { Pool } = pkg;
 
 const app = express();
 app.use(express.json());
-app.use(cors());
 
-// ================== DATA ==================
-// code -> { discordId, username, expiresAt }
-const activeCodes = new Map();
+/* =========================
+   PostgreSQL connection
+========================= */
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL.includes("render.com")
+    ? { rejectUnauthorized: false }
+    : false,
+});
 
-// ================== UTILS ==================
-function generateCode() {
-  return crypto.randomBytes(4).toString('hex').toUpperCase();
+/* =========================
+   Init DB (safe to run always)
+========================= */
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS codes (
+      id SERIAL PRIMARY KEY,
+      discord_id TEXT NOT NULL,
+      code TEXT NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMP NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_codes_discord_id
+      ON codes(discord_id);
+
+    CREATE INDEX IF NOT EXISTS idx_codes_expires_at
+      ON codes(expires_at);
+  `);
 }
 
-// ================== HEALTH CHECK ==================
-app.get('/', (_, res) => {
+initDB().catch(console.error);
+
+/* =========================
+   Helpers
+========================= */
+function generateCode() {
+  return crypto.randomBytes(4).toString("hex").toUpperCase();
+}
+
+/* =========================
+   Health check
+========================= */
+app.get("/", (_req, res) => {
   res.json({
-    status: 'API OK',
-    timestamp: new Date().toISOString()
+    status: "API OK",
+    time: new Date().toISOString(),
   });
 });
 
-// ================== GENERAR CÓDIGO ==================
-app.post('/generate-code', (req, res) => {
+/* =========================
+   Generate code
+========================= */
+app.post("/generate-code", async (req, res) => {
   try {
-    const { discordId, username } = req.body;
+    const { discordId } = req.body;
 
-    if (!discordId || !username) {
-      return res.status(400).json({
-        error: 'Datos incompletos'
+    if (!discordId) {
+      return res.status(400).json({ error: "discordId required" });
+    }
+
+    // Remove expired codes
+    await pool.query(
+      `DELETE FROM codes WHERE expires_at < NOW()`
+    );
+
+    // Check active code
+    const existing = await pool.query(
+      `
+      SELECT code, expires_at
+      FROM codes
+      WHERE discord_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [discordId]
+    );
+
+    if (existing.rows.length > 0) {
+      const { code, expires_at } = existing.rows[0];
+      return res.json({
+        code,
+        expiresAt: expires_at,
+        reused: true,
       });
     }
 
-    // Si el usuario ya tiene un código válido, devolver el mismo
-    for (const [code, data] of activeCodes.entries()) {
-      if (data.discordId === discordId && Date.now() < data.expiresAt) {
-        return res.json({ code });
-      }
-    }
-
+    // Create new code (valid 10 minutes)
     const code = generateCode();
-    const expiresAt = Date.now() + 5 * 60 * 1000;
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-    activeCodes.set(code, {
-      discordId,
-      username,
-      expiresAt
-    });
-
-    setTimeout(() => {
-      activeCodes.delete(code);
-    }, 5 * 60 * 1000);
-
-    console.log(`Código generado: ${code} para ${username}`);
-    res.json({ code });
-
-  } catch (err) {
-    console.error('Error generando código:', err);
-    res.status(500).json({
-      error: 'Error interno'
-    });
-  }
-});
-
-// ================== VALIDAR CÓDIGO ==================
-app.post('/validate-code', (req, res) => {
-  try {
-    const { code } = req.body;
-
-    if (!code) {
-      return res.status(400).json({
-        success: false,
-        error: 'Código no proporcionado'
-      });
-    }
-
-    const data = activeCodes.get(code);
-
-    if (!data) {
-      return res.json({
-        success: false,
-        error: 'Código inválido o expirado'
-      });
-    }
-
-    if (Date.now() > data.expiresAt) {
-      activeCodes.delete(code);
-      return res.json({
-        success: false,
-        error: 'Código expirado'
-      });
-    }
-
-    activeCodes.delete(code);
-
-    console.log(`Código validado: ${code}`);
+    await pool.query(
+      `
+      INSERT INTO codes (discord_id, code, expires_at)
+      VALUES ($1, $2, $3)
+      `,
+      [discordId, code, expiresAt]
+    );
 
     res.json({
-      success: true,
-      discordId: data.discordId,
-      discordUsername: data.username
+      code,
+      expiresAt,
+      reused: false,
     });
-
   } catch (err) {
-    console.error('Error validando código:', err);
-    res.status(500).json({
-      success: false,
-      error: 'Error interno'
-    });
+    console.error("API ERROR:", err);
+    res.status(500).json({ error: "internal_error" });
   }
 });
 
-// ================== LIMPIEZA AUTOMÁTICA ==================
-setInterval(() => {
-  const now = Date.now();
-  for (const [code, data] of activeCodes.entries()) {
-    if (now > data.expiresAt) {
-      activeCodes.delete(code);
-    }
-  }
-}, 60000);
-
-// ================== SERVER ==================
+/* =========================
+   Start server
+========================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`API corriendo en puerto ${PORT}`);
+  console.log(`API running on port ${PORT}`);
 });
